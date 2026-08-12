@@ -1,5 +1,5 @@
 homepage: https://stape.io/
 documentation: https://github.com/stape-io/mgid-tag
 versions:
-  - sha: <INITIAL_COMMIT_SHA>
+  - sha: 2033f79e24ac71673f932f9e84f0941360bc2024
     changeNotes: Initial release.
