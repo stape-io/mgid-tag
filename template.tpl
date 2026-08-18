@@ -47,7 +47,7 @@ ___TEMPLATE_PARAMETERS___
             "value": "pageview",
             "displayValue": "Page View",
             "subParams": [],
-            "help": "Stores your the Click ID  in a cookie (\u003ci\u003emgid_adclid\u003c/i\u003e). This Click ID is later used by the \u003cb\u003eConversion Postback\u003c/b\u003e events."
+            "help": "Stores the Click ID in a cookie (\u003ci\u003emgid_adclid\u003c/i\u003e). This Click ID is later used by the \u003cb\u003eConversion Postback\u003c/b\u003e events."
           },
           {
             "value": "conversion",
@@ -68,11 +68,6 @@ ___TEMPLATE_PARAMETERS___
           {
             "paramName": "type",
             "paramValue": "conversion",
-            "type": "EQUALS"
-          },
-          {
-            "paramName": "type",
-            "paramValue": "customer",
             "type": "EQUALS"
           }
         ]
@@ -191,8 +186,7 @@ ___TEMPLATE_PARAMETERS___
           {
             "type": "NON_EMPTY"
           }
-        ],
-        "defaultValue": ""
+        ]
       },
       {
         "type": "TEXT",
@@ -208,15 +202,17 @@ ___TEMPLATE_PARAMETERS___
       },
       {
         "type": "TEXT",
+        "name": "clickId",
+        "displayName": "Click ID",
+        "simpleValueType": true,
+        "help": "If not provided or if no value is found in the input, the Click ID will be retrieved from the query parameters or cookie (\u003ci\u003emgid_adclid\u003c/i\u003e - set by the Page View event) if available."
+      },
+      {
+        "type": "TEXT",
         "name": "revenue",
         "displayName": "Revenue",
         "simpleValueType": true,
-        "help": "Add the conversion goal value/revenue.",
-        "valueValidators": [
-          {
-            "type": "NON_EMPTY"
-          }
-        ]
+        "help": "Optional.\u003cbr/\u003eAdd the conversion goal value/revenue."
       }
     ],
     "groupStyle": "ZIPPY_OPEN_ON_PARAM",
@@ -261,12 +257,14 @@ ___TEMPLATE_PARAMETERS___
 ___SANDBOXED_JS_FOR_SERVER___
 
 const computeEffectiveTldPlusOne = require('computeEffectiveTldPlusOne');
+const encodeUriComponent = require('encodeUriComponent');
 const getAllEventData = require('getAllEventData');
 const getCookieValues = require('getCookieValues');
 const getEventData = require('getEventData');
 const getRequestHeader = require('getRequestHeader');
 const getType = require('getType');
 const JSON = require('JSON');
+const makeString = require('makeString');
 const logToConsole = require('logToConsole');
 const makeInteger = require('makeInteger');
 const parseUrl = require('parseUrl');
@@ -281,12 +279,23 @@ const eventData = getAllEventData();
 if (shouldExitEarly(data, eventData)) return;
 
 if (data.type === 'pageview') {
-  const clickId = getClickIdFromQueryParams();
-  if (!clickId) return data.gtmOnFailure();
+  const clickId = getClickIdFromQueryParams(eventData);
   setClickIdCookie(data, clickId);
   return data.gtmOnSuccess();
 } else if (data.type === 'conversion') {
-  sendConversion(data);
+  const requestData = mapRequestData(data, eventData);
+  const invalidReason = validateRequestBody(requestData);
+  if (invalidReason) {
+    log({
+      Name: 'MGID',
+      Type: 'Message',
+      EventName: 'Postback',
+      Message: '🛑 [ERROR] Request was not sent.',
+      Reason: invalidReason
+    });
+    return data.gtmOnFailure();
+  }
+  sendConversion(data, requestData);
 }
 
 if (data.useOptimisticScenario) {
@@ -297,31 +306,65 @@ if (data.useOptimisticScenario) {
   Vendor related functions
 ==============================================================================*/
 
-function generateRequestUrl(data) {
-  const baseUrl = 'https://a.mgid.com/postback/';
-  const clientId = data.clientId;
-  const eventName = data.eventName;
-  const revenue = data.revenue;
-  const clickId = getClickIdFromQueryParams() || getClickIdFromCookies();
+function mapRequestData(data, eventData) {
+  const requestData = {
+    clientId: data.clientId,
+    eventName: data.eventName,
+    clickId: data.clickId || getClickIdFromQueryParams(eventData) || getClickIdFromCookies()
+  };
 
-  if (!isValidValue(clientId) || !isValidValue(eventName) || !isValidValue(clickId)) return null;
+  if (isValidValue(data.revenue)) {
+    requestData.revenue = data.revenue;
+  }
 
-  return baseUrl + clientId + '?' + 'c=' + clickId + '&' + 'e=' + eventName + '&' + 'r=' + revenue;
+  return requestData;
 }
 
-function getClickIdFromQueryParams() {
-  const location = parseUrl(eventData.page_location);
-  const referer = parseUrl(getRequestHeader('referer'));
-  const refererSearchParams = referer.searchParams;
-  const locationSearchParams = location.searchParams;
-  if (!refererSearchParams && !locationSearchParams) return null;
-  const clickId =
-    refererSearchParams.adclid ||
-    (refererSearchParams.adclida ? refererSearchParams[refererSearchParams.adclida] : null) ||
-    locationSearchParams.adclid ||
-    (locationSearchParams.adclida ? locationSearchParams[locationSearchParams.adclida] : null);
+function validateRequestBody(requestData) {
+  const missing = [];
+  if (!isValidValue(requestData.clientId)) missing.push('Client ID');
+  if (!isValidValue(requestData.eventName)) missing.push('Event Name');
+  if (!isValidValue(requestData.clickId)) missing.push('Click ID');
 
-  return clickId;
+  if (missing.length > 0) {
+    return 'Missing required parameters: ' + missing.join(', ');
+  }
+}
+
+function generateRequestUrl(requestData) {
+  const baseUrl = 'https://a.mgid.com/postback/';
+
+  return (
+    baseUrl +
+    enc(requestData.clientId) +
+    '?c=' +
+    enc(requestData.clickId) +
+    '&e=' +
+    enc(requestData.eventName) +
+    (isValidValue(requestData.revenue) ? '&r=' + enc(requestData.revenue) : '') +
+    '&m=stape-sgtm'
+  );
+}
+
+function getClickIdFromQueryParams(eventData) {
+  const searchParamsFromMultipleSources = [
+    eventData.page_location,
+    eventData.page_referrer,
+    getRequestHeader('referer')
+  ]
+    .filter((url) => !!url)
+    .map(parseUrl)
+    .filter((url) => !!url)
+    .map((url) => url.searchParams);
+
+  for (const searchParams of searchParamsFromMultipleSources) {
+    if (getType(searchParams.adclid) === 'string') return searchParams.adclid;
+    const aliasKey = searchParams.adclida;
+    if (getType(aliasKey) === 'string' && getType(searchParams[aliasKey]) === 'string') {
+      return searchParams[aliasKey];
+    }
+  }
+  return null;
 }
 
 function getClickIdFromCookies() {
@@ -341,18 +384,8 @@ function setClickIdCookie(data, clickId) {
   setCookie('mgid_adclid', clickId, cookieOptions, false);
 }
 
-function sendConversion(data) {
-  const requestUrl = generateRequestUrl(data);
-  if (!requestUrl) {
-    log({
-      Name: 'MGID',
-      Type: 'Message',
-      EventName: 'Postback',
-      Message: '🛑 [ERROR] Request was not sent.',
-      Reason: 'Malformed URL. Missing required parameters'
-    });
-    return data.gtmOnFailure();
-  }
+function sendConversion(data, requestData) {
+  const requestUrl = generateRequestUrl(requestData);
 
   return sendHttpRequest(requestUrl)
     .then((response) => {
@@ -395,6 +428,11 @@ function getCookieDomain(data) {
     ? computeEffectiveTldPlusOne(getEventData('page_location') || getRequestHeader('referer')) ||
         'auto'
     : data.cookieDomain;
+}
+
+function enc(data) {
+  if (['null', 'undefined'].indexOf(getType(data)) !== -1) data = '';
+  return encodeUriComponent(makeString(data));
 }
 
 function isConsentGivenOrNotRequired(data, eventData) {
@@ -694,6 +732,23 @@ scenarios:
     assertApi('sendHttpRequest').wasNotCalled();
     assertApi('gtmOnSuccess').wasCalled();
     assertApi('gtmOnFailure').wasNotCalled();
+- name: '[Early Exit] Proceeds normally when required consent is given'
+  code: |-
+    [
+      { 'x-ga-gcs': 'G110' },
+      { consent_state: { ad_storage: true } }
+    ].forEach((consentEventData) => {
+      mockData.type = 'pageview';
+      mockData.adStorageConsent = 'required';
+      mock('getAllEventData', () => (
+        assign({ page_location: 'https://example.com/?adclid=123' }, consentEventData)
+      ));
+      mock('setCookie', () => {});
+      runCode(mockData);
+      assertApi('setCookie').wasCalled();
+      assertApi('gtmOnSuccess').wasCalled();
+      assertApi('gtmOnFailure').wasNotCalled();
+    });
 - name: '[Early Exit] Consent check is skipped when adStorageConsent is optional'
   code: |-
     mockData.type = 'conversion';
@@ -724,7 +779,8 @@ scenarios:
     assertApi('sendHttpRequest').wasNotCalled();
     assertApi('gtmOnSuccess').wasCalled();
     assertApi('gtmOnFailure').wasNotCalled();
-- name: '[Page View] Calls gtmOnFailure when no click id is found'
+- name: '[Page View] Calls gtmOnSuccess and doesnt set cookie when no click id is
+    found'
   code: |-
     mockData.type = 'pageview';
     mock('getAllEventData', () => ({
@@ -732,8 +788,50 @@ scenarios:
     }));
     runCode(mockData);
     assertApi('sendHttpRequest').wasNotCalled();
-    assertApi('gtmOnSuccess').wasNotCalled();
-    assertApi('gtmOnFailure').wasCalled();
+    assertApi('setCookie').wasNotCalled();
+    assertApi('gtmOnSuccess').wasCalled();
+    assertApi('gtmOnFailure').wasNotCalled();
+- name: '[Page View] Stores click id read from the aliased query parameter (adclida)'
+  code: |-
+    mockData.type = 'pageview';
+    mock('getAllEventData', () => ({
+      page_location: 'https://example.com/?adclida=my_click_id&my_click_id=abc123'
+    }));
+    let storedClickId;
+    mock('setCookie', (name, value) => {
+      storedClickId = value;
+    });
+    runCode(mockData);
+    assertThat(storedClickId).isEqualTo('abc123');
+    assertApi('gtmOnSuccess').wasCalled();
+    assertApi('gtmOnFailure').wasNotCalled();
+- name: '[Page View] Does not crash when a URL source is malformed and still finds
+    the click id from another source'
+  code: |-
+    mockData.type = 'pageview';
+    mock('getAllEventData', () => ({
+      page_location: 'not-a-valid-url',
+      page_referrer: 'https://example.com/?adclid=abc123'
+    }));
+    let storedClickId;
+    mock('setCookie', (name, value) => {
+      storedClickId = value;
+    });
+    runCode(mockData);
+    assertThat(storedClickId).isEqualTo('abc123');
+    assertApi('gtmOnSuccess').wasCalled();
+    assertApi('gtmOnFailure').wasNotCalled();
+- name: '[Page View] Ignores a repeated adclid query parameter instead of using it
+    as-is'
+  code: |-
+    mockData.type = 'pageview';
+    mock('getAllEventData', () => ({
+      page_location: 'https://example.com/?adclid=a&adclid=b'
+    }));
+    runCode(mockData);
+    assertApi('setCookie').wasNotCalled();
+    assertApi('gtmOnSuccess').wasCalled();
+    assertApi('gtmOnFailure').wasNotCalled();
 - name: '[Page View] Stores the click id cookie using the configured domain sameSite
     httpOnly and expiration'
   code: |-
@@ -760,20 +858,58 @@ scenarios:
       assertApi('gtmOnSuccess').wasCalled();
       assertApi('gtmOnFailure').wasNotCalled();
     });
-- name: '[Conversion] Calls gtmOnFailure without sending a request when no identifier
-    is provided'
+- name: '[Conversion] Sends conversion postback request with clientId, eventName,
+    clickId, revenue'
   code: |-
     mockData.type = 'conversion';
-    mockData.clientId = undefined;
-    mock('getEventData', (data) => {
-    if(data === 'page_location') return 'https://example.com';
+    mockData.clientId = 'test_client';
+    mockData.eventName = 'purchase';
+    mockData.clickId = 'test_click_id';
+    mockData.revenue = '150.50';
+    let sentUrl;
+    mock('sendHttpRequest', (url) => {
+      sentUrl = url;
+      return Promise.create((resolve) => resolve({ statusCode: 200, body: '' }));
     });
-
     runCode(mockData);
-
-    assertApi('sendHttpRequest').wasNotCalled();
-    assertApi('gtmOnSuccess').wasNotCalled();
-    assertApi('gtmOnFailure').wasCalled();
+    callLater(() => {
+      assertApi('sendHttpRequest').wasCalled();
+      assertThat(sentUrl).isEqualTo('https://a.mgid.com/postback/test_client?c=test_click_id&e=purchase&r=150.50&m=stape-sgtm');
+      assertApi('gtmOnSuccess').wasCalled();
+    });
+- name: '[Conversion] Omits revenue from URL when revenue is not provided'
+  code: |-
+    mockData.type = 'conversion';
+    mockData.clientId = 'test_client';
+    mockData.eventName = 'lead';
+    mockData.clickId = 'test_click_id';
+    mockData.revenue = undefined;
+    let sentUrl;
+    mock('sendHttpRequest', (url) => {
+      sentUrl = url;
+      return Promise.create((resolve) => resolve({ statusCode: 200, body: '' }));
+    });
+    runCode(mockData);
+    callLater(() => {
+      assertApi('sendHttpRequest').wasCalled();
+      assertThat(sentUrl).isEqualTo('https://a.mgid.com/postback/test_client?c=test_click_id&e=lead&m=stape-sgtm');
+      assertApi('gtmOnSuccess').wasCalled();
+    });
+- name: '[Conversion] Calls gtmOnFailure without sending a request when a required
+    parameter is missing'
+  code: |-
+    mock('getCookieValues', () => ([]));
+    [
+      { clientId: undefined, eventName: 'purchase', clickId: 'id1' },
+      { clientId: 'test_client', eventName: undefined, clickId: 'id1' },
+      { clientId: 'test_client', eventName: 'purchase', clickId: undefined }
+    ].forEach((overrides) => {
+      const copyMockData = createMockData(assign({ type: 'conversion' }, overrides));
+      runCode(copyMockData);
+      assertApi('sendHttpRequest').wasNotCalled();
+      assertApi('gtmOnSuccess').wasNotCalled();
+      assertApi('gtmOnFailure').wasCalled();
+    });
 - name: '[Conversion] Calls gtmOnFailure for non-2xx responses and promise rejection'
   code: |-
     [{ mockResponse: (resolve, reject) => resolve({ statusCode: 400, body: '' }) },
@@ -857,5 +993,4 @@ ___NOTES___
 
 2026-08-12 Change Note:
  - Initial Release
-
 

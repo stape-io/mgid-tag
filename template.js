@@ -1,10 +1,12 @@
 const computeEffectiveTldPlusOne = require('computeEffectiveTldPlusOne');
+const encodeUriComponent = require('encodeUriComponent');
 const getAllEventData = require('getAllEventData');
 const getCookieValues = require('getCookieValues');
 const getEventData = require('getEventData');
 const getRequestHeader = require('getRequestHeader');
 const getType = require('getType');
 const JSON = require('JSON');
+const makeString = require('makeString');
 const logToConsole = require('logToConsole');
 const makeInteger = require('makeInteger');
 const parseUrl = require('parseUrl');
@@ -19,12 +21,23 @@ const eventData = getAllEventData();
 if (shouldExitEarly(data, eventData)) return;
 
 if (data.type === 'pageview') {
-  const clickId = getClickIdFromQueryParams();
-  if (!clickId) return data.gtmOnFailure();
+  const clickId = getClickIdFromQueryParams(eventData);
   setClickIdCookie(data, clickId);
   return data.gtmOnSuccess();
 } else if (data.type === 'conversion') {
-  sendConversion(data);
+  const requestData = mapRequestData(data, eventData);
+  const invalidReason = validateRequestBody(requestData);
+  if (invalidReason) {
+    log({
+      Name: 'MGID',
+      Type: 'Message',
+      EventName: 'Postback',
+      Message: '🛑 [ERROR] Request was not sent.',
+      Reason: invalidReason
+    });
+    return data.gtmOnFailure();
+  }
+  sendConversion(data, requestData);
 }
 
 if (data.useOptimisticScenario) {
@@ -35,31 +48,65 @@ if (data.useOptimisticScenario) {
   Vendor related functions
 ==============================================================================*/
 
-function generateRequestUrl(data) {
-  const baseUrl = 'https://a.mgid.com/postback/';
-  const clientId = data.clientId;
-  const eventName = data.eventName;
-  const revenue = data.revenue;
-  const clickId = getClickIdFromCookies() || getClickIdFromQueryParams();
+function mapRequestData(data, eventData) {
+  const requestData = {
+    clientId: data.clientId,
+    eventName: data.eventName,
+    clickId: data.clickId || getClickIdFromQueryParams(eventData) || getClickIdFromCookies()
+  };
 
-  if (!isValidValue(clientId) || !isValidValue(eventName) || !isValidValue(clickId)) return null;
+  if (isValidValue(data.revenue)) {
+    requestData.revenue = data.revenue;
+  }
 
-  return baseUrl + clientId + '?' + 'c=' + clickId + '&' + 'e=' + eventName + '&' + 'r=' + revenue;
+  return requestData;
 }
 
-function getClickIdFromQueryParams() {
-  const location = parseUrl(eventData.page_location);
-  const referer = parseUrl(getRequestHeader('referer'));
-  const refererSearchParams = referer.searchParams;
-  const locationSearchParams = location.searchParams;
-  if (!refererSearchParams && !locationSearchParams) return null;
-  const clickId =
-    (refererSearchParams.adclida ? refererSearchParams[refererSearchParams.adclida] : null) ||
-    (locationSearchParams.adclida ? locationSearchParams[locationSearchParams.adclida] : null) ||
-    refererSearchParams.adclid ||
-    locationSearchParams.adclid;
+function validateRequestBody(requestData) {
+  const missing = [];
+  if (!isValidValue(requestData.clientId)) missing.push('Client ID');
+  if (!isValidValue(requestData.eventName)) missing.push('Event Name');
+  if (!isValidValue(requestData.clickId)) missing.push('Click ID');
 
-  return clickId;
+  if (missing.length > 0) {
+    return 'Missing required parameters: ' + missing.join(', ');
+  }
+}
+
+function generateRequestUrl(requestData) {
+  const baseUrl = 'https://a.mgid.com/postback/';
+
+  return (
+    baseUrl +
+    enc(requestData.clientId) +
+    '?c=' +
+    enc(requestData.clickId) +
+    '&e=' +
+    enc(requestData.eventName) +
+    (isValidValue(requestData.revenue) ? '&r=' + enc(requestData.revenue) : '') +
+    '&m=stape-sgtm'
+  );
+}
+
+function getClickIdFromQueryParams(eventData) {
+  const searchParamsFromMultipleSources = [
+    eventData.page_location,
+    eventData.page_referrer,
+    getRequestHeader('referer')
+  ]
+    .filter((url) => !!url)
+    .map(parseUrl)
+    .filter((url) => !!url)
+    .map((url) => url.searchParams);
+
+  for (const searchParams of searchParamsFromMultipleSources) {
+    if (getType(searchParams.adclid) === 'string') return searchParams.adclid;
+    const aliasKey = searchParams.adclida;
+    if (getType(aliasKey) === 'string' && getType(searchParams[aliasKey]) === 'string') {
+      return searchParams[aliasKey];
+    }
+  }
+  return null;
 }
 
 function getClickIdFromCookies() {
@@ -79,18 +126,8 @@ function setClickIdCookie(data, clickId) {
   setCookie('mgid_adclid', clickId, cookieOptions, false);
 }
 
-function sendConversion(data) {
-  const requestUrl = generateRequestUrl(data);
-  if (!requestUrl) {
-    log({
-      Name: 'MGID',
-      Type: 'Message',
-      EventName: 'Postback',
-      Message: '🛑 [ERROR] Request was not sent.',
-      Reason: 'Malformed URL. Missing required parameters'
-    });
-    return data.gtmOnFailure();
-  }
+function sendConversion(data, requestData) {
+  const requestUrl = generateRequestUrl(requestData);
 
   return sendHttpRequest(requestUrl)
     .then((response) => {
@@ -133,6 +170,11 @@ function getCookieDomain(data) {
     ? computeEffectiveTldPlusOne(getEventData('page_location') || getRequestHeader('referer')) ||
         'auto'
     : data.cookieDomain;
+}
+
+function enc(data) {
+  if (['null', 'undefined'].indexOf(getType(data)) !== -1) data = '';
+  return encodeUriComponent(makeString(data));
 }
 
 function isConsentGivenOrNotRequired(data, eventData) {

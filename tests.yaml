@@ -52,6 +52,23 @@ scenarios:
       assertApi('sendHttpRequest').wasNotCalled();
       assertApi('gtmOnSuccess').wasCalled();
       assertApi('gtmOnFailure').wasNotCalled();
+  - name: '[Early Exit] Proceeds normally when required consent is given'
+    code: |-
+      [
+        { 'x-ga-gcs': 'G110' },
+        { consent_state: { ad_storage: true } }
+      ].forEach((consentEventData) => {
+        mockData.type = 'pageview';
+        mockData.adStorageConsent = 'required';
+        mock('getAllEventData', () => (
+          assign({ page_location: 'https://example.com/?adclid=123' }, consentEventData)
+        ));
+        mock('setCookie', () => {});
+        runCode(mockData);
+        assertApi('setCookie').wasCalled();
+        assertApi('gtmOnSuccess').wasCalled();
+        assertApi('gtmOnFailure').wasNotCalled();
+      });
   - name: '[Early Exit] Consent check is skipped when adStorageConsent is optional'
     code: |-
       mockData.type = 'conversion';
@@ -82,7 +99,8 @@ scenarios:
       assertApi('sendHttpRequest').wasNotCalled();
       assertApi('gtmOnSuccess').wasCalled();
       assertApi('gtmOnFailure').wasNotCalled();
-  - name: '[Page View] Calls gtmOnFailure when no click id is found'
+  - name: '[Page View] Calls gtmOnSuccess and doesnt set cookie when no click id is
+      found'
     code: |-
       mockData.type = 'pageview';
       mock('getAllEventData', () => ({
@@ -90,8 +108,50 @@ scenarios:
       }));
       runCode(mockData);
       assertApi('sendHttpRequest').wasNotCalled();
-      assertApi('gtmOnSuccess').wasNotCalled();
-      assertApi('gtmOnFailure').wasCalled();
+      assertApi('setCookie').wasNotCalled();
+      assertApi('gtmOnSuccess').wasCalled();
+      assertApi('gtmOnFailure').wasNotCalled();
+  - name: '[Page View] Stores click id read from the aliased query parameter (adclida)'
+    code: |-
+      mockData.type = 'pageview';
+      mock('getAllEventData', () => ({
+        page_location: 'https://example.com/?adclida=my_click_id&my_click_id=abc123'
+      }));
+      let storedClickId;
+      mock('setCookie', (name, value) => {
+        storedClickId = value;
+      });
+      runCode(mockData);
+      assertThat(storedClickId).isEqualTo('abc123');
+      assertApi('gtmOnSuccess').wasCalled();
+      assertApi('gtmOnFailure').wasNotCalled();
+  - name: '[Page View] Does not crash when a URL source is malformed and still finds
+      the click id from another source'
+    code: |-
+      mockData.type = 'pageview';
+      mock('getAllEventData', () => ({
+        page_location: 'not-a-valid-url',
+        page_referrer: 'https://example.com/?adclid=abc123'
+      }));
+      let storedClickId;
+      mock('setCookie', (name, value) => {
+        storedClickId = value;
+      });
+      runCode(mockData);
+      assertThat(storedClickId).isEqualTo('abc123');
+      assertApi('gtmOnSuccess').wasCalled();
+      assertApi('gtmOnFailure').wasNotCalled();
+  - name: '[Page View] Ignores a repeated adclid query parameter instead of using
+      it as-is'
+    code: |-
+      mockData.type = 'pageview';
+      mock('getAllEventData', () => ({
+        page_location: 'https://example.com/?adclid=a&adclid=b'
+      }));
+      runCode(mockData);
+      assertApi('setCookie').wasNotCalled();
+      assertApi('gtmOnSuccess').wasCalled();
+      assertApi('gtmOnFailure').wasNotCalled();
   - name: '[Page View] Stores the click id cookie using the configured domain sameSite
       httpOnly and expiration'
     code: |-
@@ -118,20 +178,57 @@ scenarios:
         assertApi('gtmOnSuccess').wasCalled();
         assertApi('gtmOnFailure').wasNotCalled();
       });
-  - name: '[Conversion] Calls gtmOnFailure without sending a request when no identifier
-      is provided'
+  - name: '[Conversion] Sends conversion postback request with clientId, eventName, clickId, revenue'
     code: |-
       mockData.type = 'conversion';
-      mockData.clientId = undefined;
-      mock('getEventData', (data) => {
-      if(data === 'page_location') return 'https://example.com';
+      mockData.clientId = 'test_client';
+      mockData.eventName = 'purchase';
+      mockData.clickId = 'test_click_id';
+      mockData.revenue = '150.50';
+      let sentUrl;
+      mock('sendHttpRequest', (url) => {
+        sentUrl = url;
+        return Promise.create((resolve) => resolve({ statusCode: 200, body: '' }));
       });
-
       runCode(mockData);
-
-      assertApi('sendHttpRequest').wasNotCalled();
-      assertApi('gtmOnSuccess').wasNotCalled();
-      assertApi('gtmOnFailure').wasCalled();
+      callLater(() => {
+        assertApi('sendHttpRequest').wasCalled();
+        assertThat(sentUrl).isEqualTo('https://a.mgid.com/postback/test_client?c=test_click_id&e=purchase&r=150.50&m=stape-sgtm');
+        assertApi('gtmOnSuccess').wasCalled();
+      });
+  - name: '[Conversion] Omits revenue from URL when revenue is not provided'
+    code: |-
+      mockData.type = 'conversion';
+      mockData.clientId = 'test_client';
+      mockData.eventName = 'lead';
+      mockData.clickId = 'test_click_id';
+      mockData.revenue = undefined;
+      let sentUrl;
+      mock('sendHttpRequest', (url) => {
+        sentUrl = url;
+        return Promise.create((resolve) => resolve({ statusCode: 200, body: '' }));
+      });
+      runCode(mockData);
+      callLater(() => {
+        assertApi('sendHttpRequest').wasCalled();
+        assertThat(sentUrl).isEqualTo('https://a.mgid.com/postback/test_client?c=test_click_id&e=lead&m=stape-sgtm');
+        assertApi('gtmOnSuccess').wasCalled();
+      });
+  - name: '[Conversion] Calls gtmOnFailure without sending a request when a required
+      parameter is missing'
+    code: |-
+      mock('getCookieValues', () => ([]));
+      [
+        { clientId: undefined, eventName: 'purchase', clickId: 'id1' },
+        { clientId: 'test_client', eventName: undefined, clickId: 'id1' },
+        { clientId: 'test_client', eventName: 'purchase', clickId: undefined }
+      ].forEach((overrides) => {
+        const copyMockData = createMockData(assign({ type: 'conversion' }, overrides));
+        runCode(copyMockData);
+        assertApi('sendHttpRequest').wasNotCalled();
+        assertApi('gtmOnSuccess').wasNotCalled();
+        assertApi('gtmOnFailure').wasCalled();
+      });
   - name: '[Conversion] Calls gtmOnFailure for non-2xx responses and promise rejection'
     code: |-
       [{ mockResponse: (resolve, reject) => resolve({ statusCode: 400, body: '' }) },

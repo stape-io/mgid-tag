@@ -11,9 +11,9 @@ The **MGID tag** for Google Tag Manager Server Container lets you integrate MGID
 
 - **To set up a Pageview Tag:** Select **Page View** as the Event Type. This tag captures and stores your MGID Click ID in a cookie (`mgid_adclid`) so it can be referenced later for conversions. You can optionally adjust the **Cookie Settings** to define the Cookie Expiration (defaults to 365 days), Cookie Domain, Cookie SameSite, and Http Only Flag.
 
-- **To set up a Conversion Tag:** Select **Conversion Track** as the Event Type to send a conversion back to your MGID Ad account. Under the **Conversion Data** settings, you must provide your MGID Client ID, Event Name, and the Revenue amount.
+- **To set up a Conversion Tag:** Select **Conversion Track** as the Event Type to send a conversion back to your MGID Ad account. Under the **Conversion Data** settings, you must provide your MGID Client ID and Event Name. Revenue is optional. Click ID is also optional — if not provided, it will automatically be retrieved from the query parameters or from the `mgid_adclid` cookie set by the Page View event.
 
-## Useful links
+## Useful Resources
 
 - [MGID Postback documentation](https://help.mgid.com/postback-tracking-method)
 
