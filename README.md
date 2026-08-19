@@ -20,3 +20,6 @@ The **MGID tag** for Google Tag Manager Server Container lets you integrate MGID
 ## Open Source
 
 MGID tag for GTM Server Side is developed and maintained by [Stape Team](https://stape.io/) under the Apache 2.0 license.
+
+### GTM Gallery Status
+🔴 Not listed
